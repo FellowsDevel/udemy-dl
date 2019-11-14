@@ -37,11 +37,15 @@ from ._utils import (
             unescapeHTML
             )
 from ._compat import (
+            re,
             time,
             encoding,
             conn_error,
             COURSE_URL,
+            ParseCookie,
             MY_COURSES_URL,
+            COURSE_SEARCH,
+            COLLECTION_URL
             )
 from ._sanitize import (
             slugify,
@@ -56,20 +60,54 @@ class Udemy(ProgressBar):
 
     def __init__(self):
         self._session = ''
+        self._cookies = ''
 
-    def _course_name(self, url):
-        if '/learn/v4' in url:
-            url = url.split("learn/v4")[0]
-        course_name = url.split("/")[-1] if not url.endswith("/") else url.split("/")[-2]
-        return course_name
-    
-    def _sanitize(self, unsafetext):
-        text = sanitize(slugify(unsafetext, lower=False, spaces=True, ok=SLUG_OK + '().'))
+
+    def _clean(self, text):
+        ok = re.compile(r'[^\\/:*?"<>|]')
+        text = "".join(x if ok.match(x) else "_" for x in text)
+        text = re.sub(r'\.+$', '', text.strip())
         return text
 
-    def _login(self, username='', password=''):
-        auth = UdemyAuth(username=username, password=password)
-        self._session = auth.authenticate()
+    def _course_name(self, url):
+        mobj = re.search(r'(?i)(?://(?P<portal_name>.+?).udemy.com/(?:course(/draft)*/)?(?P<name_or_id>[a-zA-Z0-9_-]+))', url)
+        if mobj:
+            return mobj.group('portal_name'), mobj.group('name_or_id')
+
+    def _extract_cookie_string(self, raw_cookies):
+        cookies = {}
+        try:
+            # client_id = re.search(r'(?i)(?:client_id=(?P<client_id>\w+))', raw_cookies)
+            access_token = re.search(r'(?i)(?:access_token=(?P<access_token>\w+))', raw_cookies)
+        except:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Cookies error, Request Headers is required.\n")
+            sys.stdout.write(fc + sd + "[" + fm + sb + "i" + fc + sd + "] : " + fg + sb + "Copy Request Headers for single request to a file, while you are logged in.\n")
+            sys.exit(0)
+        if not access_token:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Cookies error, unable to find access_token, proper cookies required.\n")
+            sys.stdout.flush()
+            sys.exit(0)
+        access_token = access_token.group('access_token')
+        cookies.update({'access_token': access_token})
+        #'client_id': client_id.group('client_id'),
+        return cookies
+
+    def _sanitize(self, unsafetext):
+        text = sanitize(slugify(unsafetext, lower=False, spaces=True, ok=SLUG_OK + '().[]'))
+        return text
+
+    def _login(self, username='', password='', cookies=''):
+        if not cookies:
+            auth = UdemyAuth(username=username, password=password)
+            self._session = auth.authenticate()
+        if cookies:
+            self._cookies = self._extract_cookie_string(raw_cookies=cookies)
+            access_token = self._cookies.get('access_token')
+            client_id = self._cookies.get('client_id')
+            time.sleep(0.3)
+            auth = UdemyAuth()
+            self._session = auth.authenticate(access_token=access_token, client_id=client_id)
+            self._session._session.cookies.update(self._cookies)
         if self._session is not None:
             return {'login' : 'successful'}
         else:
@@ -78,43 +116,139 @@ class Udemy(ProgressBar):
     def _logout(self):
         return self._session.terminate()
 
-    def _extract_course_info(self, url):
+    def _subscribed_courses(self, portal_name, course_name):
+        results = []
+        self._session._headers.update({
+            'Host' : '{portal_name}.udemy.com'.format(portal_name=portal_name),
+            'Referer' : 'https://{portal_name}.udemy.com/home/my-courses/search/?q={course_name}'.format(portal_name=portal_name, course_name=course_name)
+            })
+        url = COURSE_SEARCH.format(portal_name=portal_name, course_name=course_name)
         try:
-            webpage = self._session._get(url).text
+            webpage = self._session._get(url).json()
         except conn_error as e:
             sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
             time.sleep(0.8)
             sys.exit(0)
+        except (ValueError, Exception) as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "%s.\n" % (e))
+            time.sleep(0.8)
+            sys.exit(0)
         else:
-            course = parse_json(
-                        search_regex(
-                            r'ng-init=["\'].*\bcourse=({.+?});', 
-                            webpage, 
-                            'course', 
-                            default='{}'
-                            ),
-                        "Course Information",
-                        transform_source=unescapeHTML,
-                        fatal=False,
-                        )
-            course_id = course.get('id') or search_regex(
-                                                (r'&quot;id&quot;\s*:\s*(\d+)', r'data-course-id=["\'](\d+)'),
-                                                webpage, 
-                                                'course id'
-                                                )
-        if course_id:
-            return course_id, course
+            results = webpage.get('results', [])
+        return results
+
+    def _my_courses(self, portal_name):
+        results = []
+        try:
+            url = MY_COURSES_URL.format(portal_name=portal_name)
+            webpage = self._session._get(url).json()
+        except conn_error as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
+            time.sleep(0.8)
+            sys.exit(0)
+        except (ValueError, Exception) as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "%s.\n" % (e))
+            time.sleep(0.8)
+            sys.exit(0)
         else:
+            results = webpage.get('results', [])
+        return results
+
+    def _subscribed_collection_courses(self, portal_name):
+        url = COLLECTION_URL.format(portal_name=portal_name)
+        courses_lists = []
+        try:
+            webpage = self._session._get(url).json()
+        except conn_error as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
+            time.sleep(0.8)
+            sys.exit(0)
+        except (ValueError, Exception) as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "%s.\n" % (e))
+            time.sleep(0.8)
+            sys.exit(0)
+        else:
+            results = webpage.get('results', [])
+            if results:
+                [courses_lists.extend(courses.get('courses', [])) for courses in results if courses.get('courses', [])]
+        return courses_lists
+
+    def __extract_course(self, response, course_name):
+        _temp = {}
+        if response:
+            for entry in response:
+                course_id = str(entry.get('id'))
+                published_title = entry.get('published_title')
+                if course_name in (published_title, course_id):
+                    _temp = entry
+                    break
+        return _temp
+
+    def _extract_course_info(self, url):
+        portal_name, course_name = self._course_name(url)
+        course = {}
+        results = self._subscribed_courses(portal_name=portal_name, course_name=course_name)
+        if not results:
+            results = self._my_courses(portal_name=portal_name)
+        if results:
+            course = self.__extract_course(response=results, course_name=course_name)
+        if not course:
+            results = self._subscribed_collection_courses(portal_name=portal_name)
+            course = self.__extract_course(response=results, course_name=course_name)
+
+        if course:
+            course.update({'portal_name' : portal_name})
+            return course.get('id'), course
+        if not course:
+            sys.stdout.write('\033[2K\033[1G\r\r' + fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fg + sb + "Downloading course information, course id not found .. (%s%sfailed%s%s)\n" % (fr, sb, fg, sb))
+            sys.stdout.write(fc + sd + "[" + fw + sb + "i" + fc + sd + "] : " + fw + sb + "It seems either you are not enrolled or you have to visit the course atleast once while you are logged in.\n")
+            sys.stdout.write(fc + sd + "[" + fm + sb + "*" + fc + sd + "] : " + fg + sb + "Trying to logout now...\n")
+            if not self._cookies:
+                self._logout()
+            sys.stdout.write(fc + sd + "[" + fm + sb + "+" + fc + sd + "] : " + fg + sb + "Logged out successfully.\n")
             sys.exit(0)
 
-    def _extract_course_json(self, course_id):
-        url = COURSE_URL.format(course_id=course_id)
+    def _extract_large_course_content(self, url):
+        url = url.replace('10000', '300') if url.endswith('10000') else url
         try:
-            resp = self._session._get(url).json()
+            data = self._session._get(url).json()
         except conn_error as e:
             sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
             time.sleep(0.8)
             sys.exit(0)
+        else:
+            _next = data.get('next')
+            while _next:
+                try:
+                    resp = self._session._get(_next).json()
+                except conn_error as e:
+                    sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
+                    time.sleep(0.8)
+                    sys.exit(0)
+                else:
+                    _next = resp.get('next')
+                    results = resp.get('results')
+                    if results and isinstance(results, list):
+                        for d in resp['results']:
+                            data['results'].append(d)
+            return data
+
+    def _extract_course_json(self, url, course_id, portal_name):
+        self._session._headers.update({'Referer' : url})
+        url = COURSE_URL.format(portal_name=portal_name, course_id=course_id)
+        try:
+            resp = self._session._get(url)
+            if resp.status_code == 502:
+                resp = self._extract_large_course_content(url=url)
+            else:
+                resp = resp.json()
+        except conn_error as e:
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
+            time.sleep(0.8)
+            sys.exit(0)
+        except (ValueError, Exception) as e:
+            resp = self._extract_large_course_content(url=url)
+            return resp
         else:
             return resp
 
@@ -189,13 +323,30 @@ class Udemy(ProgressBar):
                 })
         return _temp
 
+    def _extract_audio(self, assets):
+        _temp = []
+        download_urls = assets.get('download_urls')
+        filename = self._sanitize(assets.get('filename'))
+        if download_urls and isinstance(download_urls, dict):
+            extension = filename.rsplit('.', 1)[-1] if '.' in filename else ''
+            download_url = download_urls.get('Audio', [])[0].get('file')
+            _temp.append({
+                'type' : 'audio',
+                'filename' : filename,
+                'extension' : extension,
+                'download_url' : download_url
+                })
+        return _temp
+
     def _extract_sources(self, sources):
         _temp   =   []
         if sources and isinstance(sources, list):
             for source in sources:
                 label           = source.get('label')
-                download_url    = source.get('src')
+                download_url    = source.get('file')
                 if not download_url:
+                    continue
+                if label.lower() == 'audio':
                     continue
                 height = label if label else None
                 if height == "2160":
@@ -233,12 +384,12 @@ class Udemy(ProgressBar):
             for track in tracks:
                 if not isinstance(track, dict):
                     continue
-                if track.get('kind') != 'captions':
+                if track.get('_class') != 'caption':
                     continue
-                download_url = track.get('src')
+                download_url = track.get('url')
                 if not download_url or not isinstance(download_url, encoding):
                     continue
-                lang = track.get('language') or track.get('srclang') or track.get('label')
+                lang = track.get('language') or track.get('srclang') or track.get('label') or track['locale_id'].split('_')[0]
                 ext = 'vtt' if 'vtt' in download_url.rsplit('.', 1)[-1] else 'srt'
                 _temp.append({
                     'type' : 'subtitle',
@@ -286,38 +437,27 @@ class Udemy(ProgressBar):
                     })
         return _temp
 
-    def _lectures_count(self, chapters):
-        lectures = 0
-        for entry in chapters:
-            lectures_count = entry.get('lectures_count')
-            lectures += lectures_count
-        return lectures
-
     def _real_extract(self, url=''):
 
         _udemy      =   {}
         course_id, course_info = self._extract_course_info(url)
 
         if course_info and isinstance(course_info, dict):
-            course_title = self._course_name(url)
-            isenrolled = course_info['features'].get('enroll')
-            if not isenrolled:
-                sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Udemy Says you are not enrolled in course.")
-                sys.stdout.write(fc + sd + "[" + fm + sb + "*" + fc + sd + "] : " + fg + sb + "Trying to logout now...\n")
-                self._logout()
-                sys.stdout.write(fc + sd + "[" + fm + sb + "+" + fc + sd + "] : " + fg + sb + "Logged out successfully.\n")
-                sys.exit(0)
-        else:
-            course_title = self._course_name(url)
+            course_title = course_info.get('published_title')
+            portal_name = course_info.get('portal_name')
 
-        course_json = self._extract_course_json(course_id)
+        course_json = self._extract_course_json(url, course_id, portal_name)
         course = course_json.get('results')
         resource = course_json.get('detail')
 
         if resource:
-            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Udemy Says : {}{}{} Run udemy-dl against course within few seconds.\n".format(resource, fw, sb))
+            if not self._cookies:
+                sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Udemy Says : {}{}{} Run udemy-dl against course within few seconds.\n".format(resource, fw, sb))
+            if self._cookies:
+                sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Udemy Says : {}{}{} cookies seems to be expired.\n".format(resource, fw, sb))
             sys.stdout.write(fc + sd + "[" + fm + sb + "*" + fc + sd + "] : " + fg + sb + "Trying to logout now...\n")
-            self._logout()
+            if not self._cookies:
+                self._logout()
             sys.stdout.write(fc + sd + "[" + fm + sb + "+" + fc + sd + "] : " + fg + sb + "Logged out successfully.\n")
             sys.exit(0)
 
@@ -337,14 +477,15 @@ class Udemy(ProgressBar):
                 if clazz == 'chapter':
                     lectures = []
                     chapter_index = entry.get('object_index')
-                    chapter_title = self._sanitize(entry.get('title'))
-                    chapter_title = re.sub('\.+$', '', chapter_title) if chapter_title.endswith(".") else chapter_title
+                    chapter_title = self._clean(self._sanitize(entry.get('title')))
                     chapter = "{0:02d} {1!s}".format(chapter_index, chapter_title)
+                    unsafe_chapter = u'{0:02d} '.format(chapter_index) + self._clean(entry.get('title'))
                     if chapter not in _udemy['chapters']:
                         _udemy['chapters'].append({
                             'chapter_title' : chapter,
                             'chapter_id' : entry.get("id"),
                             'chapter_index' : chapter_index,
+                            'unsafe_chapter' : unsafe_chapter,
                             'lectures' : [],
                             })
                         counter += 1
@@ -352,16 +493,17 @@ class Udemy(ProgressBar):
 
                     lecture_id          =   entry.get("id")
                     if len(_udemy['chapters']) == 0:
-                        lectures        =   []
-                        chapter_index   =   entry.get('object_index')
-                        chapter_title   =   self._sanitize(entry.get('title'))
-                        chapter_title   =   re.sub('\.+$', '', chapter_title) if chapter_title.endswith(".") else chapter_title
-                        chapter         =   "{0:03d} {1!s}".format(chapter_index, chapter_title)
+                        lectures = []
+                        chapter_index = entry.get('object_index')
+                        chapter_title = self._clean(self._sanitize(entry.get('title')))
+                        chapter = "{0:03d} {1!s}".format(chapter_index, chapter_title)
+                        unsafe_chapter = u'{0:02d} '.format(chapter_index) + self._clean(entry.get('title'))
                         if chapter not in _udemy['chapters']:
                             _udemy['chapters'].append({
                                 'chapter_title' : chapter,
                                 'chapter_id' : lecture_id,
                                 'chapter_index' : chapter_index,
+                                'unsafe_chapter' : unsafe_chapter,
                                 'lectures' : [],
                                 })
                             counter += 1
@@ -386,14 +528,17 @@ class Udemy(ProgressBar):
                                 retVal      = self._extract_file(asset)
                             elif asset_type == 'presentation':
                                 retVal      = self._extract_ppt(asset)
+                            elif asset_type == 'audio':
+                                retVal      = self._extract_audio(asset)
 
 
                         if view_html:
                             text = '\r' + fc + sd + "[" + fm + sb + "*" + fc + sd + "] : " + fg + sb + "Downloading course information .. "
                             self._spinner(text)
                             lecture_index   = entry.get('object_index')
-                            lecture_title   = self._sanitize(entry.get('title'))
+                            lecture_title   = self._clean(self._sanitize(entry.get('title')))
                             lecture         = "{0:03d} {1!s}".format(lecture_index, lecture_title)
+                            unsafe_lecture  = u'{0:03d} '.format(lecture_index) + entry.get('title')
                             data, subs      = self._html_to_json(view_html, lecture_id)
                             if data and isinstance(data, dict):
                                 sources     = data.get('sources')
@@ -403,6 +548,7 @@ class Udemy(ProgressBar):
                                     'lecture_index' :   lecture_index,
                                     'lectures_id' : lecture_id,
                                     'lecture_title' : lecture,
+                                    'unsafe_lecture' : unsafe_lecture,
                                     'duration' : duration,
                                     'assets' : retVal,
                                     'assets_count' : len(retVal),
@@ -416,20 +562,75 @@ class Udemy(ProgressBar):
                                     'lecture_index' : lecture_index,
                                     'lectures_id' : lecture_id,
                                     'lecture_title' : lecture,
+                                    'unsafe_lecture' : unsafe_lecture,
                                     'html_content' : view_html,
                                     'extension' : 'html',
                                     'assets' : retVal,
                                     'assets_count' : len(retVal),
                                     'subtitle_count' : 0,
-                                    'sources_count' : 0,      
+                                    'sources_count' : 0,
+                                    })
+                        if not view_html:
+                            text = '\r' + fc + sd + "[" + fm + sb + "*" + fc + sd + "] : " + fg + sb + "Downloading course information .. "
+                            self._spinner(text)
+                            lecture_index   = entry.get('object_index')
+                            lecture_title   = self._clean(self._sanitize(entry.get('title')))
+                            lecture         = "{0:03d} {1!s}".format(lecture_index, lecture_title)
+                            unsafe_lecture  = u'{0:03d} '.format(lecture_index) + self._clean(entry.get('title'))
+                            data            = asset.get('stream_urls')
+                            if data and isinstance(data, dict):
+                                sources     = data.get('Video')
+                                tracks      = asset.get('captions')
+                                duration    = asset.get('time_estimation')
+                                lectures.append({
+                                    'lecture_index' :   lecture_index,
+                                    'lectures_id' : lecture_id,
+                                    'lecture_title' : lecture,
+                                    'unsafe_lecture' : unsafe_lecture,
+                                    'duration' : duration,
+                                    'assets' : retVal,
+                                    'assets_count' : len(retVal),
+                                    'sources' : self._extract_sources(sources),
+                                    'subtitles' : self._extract_subtitles(tracks),
+                                    'subtitle_count' : len(self._extract_subtitles(tracks)),
+                                    'sources_count' : len(self._extract_sources(sources)),
+                                    })
+                            else:
+                                lectures.append({
+                                    'lecture_index' : lecture_index,
+                                    'lectures_id' : lecture_id,
+                                    'lecture_title' : lecture,
+                                    'unsafe_lecture' : unsafe_lecture,
+                                    'html_content' : asset.get('body'),
+                                    'extension' : 'html',
+                                    'assets' : retVal,
+                                    'assets_count' : len(retVal),
+                                    'subtitle_count' : 0,
+                                    'sources_count' : 0,
                                     })
 
                     _udemy['chapters'][counter]['lectures'] = lectures
                     _udemy['chapters'][counter]['lectures_count'] = len(lectures)
                 elif clazz == 'quiz':
+                    lecture_id          =   entry.get("id")
+                    if len(_udemy['chapters']) == 0:
+                        lectures        =   []
+                        chapter_index   =   entry.get('object_index')
+                        chapter_title   =   self._clean(self._sanitize(entry.get('title')))
+                        chapter         =   "{0:03d} {1!s}".format(chapter_index, chapter_title)
+                        unsafe_chapter  =  u'{0:02d} '.format(chapter_index) + self._clean(entry.get('title'))
+                        if chapter not in _udemy['chapters']:
+                            _udemy['chapters'].append({
+                                'chapter_title' : chapter,
+                                'unsafe_chapter' : unsafe_chapter,
+                                'chapter_id' : lecture_id,
+                                'chapter_index' : chapter_index,
+                                'lectures' : [],
+                                })
+                            counter += 1
                     _udemy['chapters'][counter]['lectures'] = lectures
                     _udemy['chapters'][counter]['lectures_count'] = len(lectures)
             _udemy['total_chapters'] = len(_udemy['chapters'])
-            _udemy['total_lectures'] = self._lectures_count(_udemy['chapters'])
+            _udemy['total_lectures'] = sum([entry.get('lectures_count', 0) for entry in _udemy['chapters'] if entry])
 
         return _udemy

@@ -26,8 +26,9 @@ THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 from pprint import pprint
 from ._session import Session
 from ._compat import (
+        sys,
+        time,
         conn_error,
-        LOGIN_POPUP,
         LOGIN_URL,
         )
 from ._utils import (
@@ -37,6 +38,7 @@ from ._utils import (
         hidden_inputs,
         unescapeHTML,
         )
+from ._colorized import *
 
 class UdemyAuth(object):
 
@@ -47,10 +49,11 @@ class UdemyAuth(object):
 
     def _form_hidden_input(self, form_id):
         try:
-            webpage = self._session._get(LOGIN_POPUP).text
+            webpage = self._session._get(LOGIN_URL).text
         except conn_error as e:
-            print(e)
-            exit(0)
+            sys.stdout.write(fc + sd + "[" + fr + sb + "-" + fc + sd + "] : " + fr + sb + "Connection error : make sure your internet connection is working.\n")
+            time.sleep(0.8)
+            sys.exit(0)
         else:
             login_form = hidden_inputs(
                             search_regex(
@@ -66,15 +69,16 @@ class UdemyAuth(object):
                 })
             return login_form
 
-    def authenticate(self):
-        form = self._form_hidden_input('login-form')
-        auth_response = self._session._post(LOGIN_URL, data=form)
-        auth_cookies = auth_response.cookies
-
-        access_token = auth_cookies.get('access_token') or None
-        client_id = auth_cookies.get('client_id') or None
+    def authenticate(self, access_token='', client_id=''):
+        if not access_token and not client_id:
+            data = self._form_hidden_input(form_id='login-form')
+            auth_response = self._session._post(LOGIN_URL, data=data, redirect=False)
+            auth_cookies = auth_response.cookies
+            
+            access_token = auth_cookies.get('access_token', '')
+            client_id = auth_cookies.get('client_id', '')
         
-        if access_token and client_id:
+        if access_token:
             self._session._set_auth_headers(access_token=access_token, client_id=client_id)
             return self._session
         else:

@@ -28,6 +28,7 @@ import os
 import sys
 import time
 import json
+import codecs
 import requests
 if sys.version_info[:2] >= (3, 0):
 
@@ -41,6 +42,7 @@ if sys.version_info[:2] >= (3, 0):
     from urllib.request import urlopen as compat_urlopen
     from urllib.request import build_opener as compat_opener
     from html.parser import HTMLParser as compat_HTMLParser
+    from http.cookies import SimpleCookie as ParseCookie
     from requests.exceptions import ConnectionError as conn_error
 
     encoding, pyver = str, 3
@@ -56,6 +58,7 @@ else:
     from urllib2 import HTTPError as compat_httperr
     from urllib2 import build_opener as compat_opener
     from urlparse import urlparse as compat_urlparse
+    from Cookie import SimpleCookie as ParseCookie
     from HTMLParser import HTMLParser as compat_HTMLParser
     from requests.exceptions import ConnectionError as conn_error
 
@@ -63,17 +66,22 @@ else:
 
 
 NO_DEFAULT = object()
-LOGIN_POPUP = 'https://www.udemy.com/join/login-popup'
-LOGIN_URL = 'https://www.udemy.com/join/login-popup/?displayType=ajax&display_type=popup&showSkipButton=1&returnUrlAfterLogin=https%3A%2F%2Fwww.udemy.com%2F&next=https%3A%2F%2Fwww.udemy.com%2F&locale=en_US'
+LOGIN_URL = 'https://www.udemy.com/join/login-popup/?displayType=ajax&display_type=popup&showSkipButton=1&returnUrlAfterLogin=https'#'https://www.udemy.com/api-2.0/auth/udemy-auth/login/?fields[user]=access_token'
 LOGOUT_URL = 'https://www.udemy.com/user/logout'
 
-MY_COURSES_URL = 'https://www.udemy.com/api-2.0/users/me/subscribed-courses?fields[course]=id,title,published_title,headline,url,num_lectures,num_reviews,num_subscribers,created,enrollment_time,completion_ratio,avg_rating,locale&page=1&page_size=100'
-COURSE_URL = 'https://www.udemy.com/api-2.0/courses/{course_id}/cached-subscriber-curriculum-items?fields[asset]=results,external_url,download_urls,slide_urls,filename,asset_type&fields[chapter]=object_index,title,sort_order&fields[lecture]=id,title,object_index,asset,supplementary_assets,view_html&page_size=10000'
+WISHLIST_URL = "https://{portal_name}.udemy.com/api-2.0/users/me/wishlisted-courses?fields[course]=id,url,published_title&ordering=-access_time&page=1&page_size=1000"
+COLLECTION_URL = "https://{portal_name}.udemy.com/api-2.0/users/me/subscribed-courses-collections/?collection_has_courses=True&course_limit=20&fields[course]=last_accessed_time,published_title&fields[user_has_subscribed_courses_collection]=@all&page=1&page_size=1000"
+MY_COURSES_URL = "https://{portal_name}.udemy.com/api-2.0/users/me/subscribed-courses?fields[course]=id,url,published_title&ordering=-access_time&page=1&page_size=10000"
+COURSE_SEARCH = "https://{portal_name}.udemy.com/api-2.0/users/me/subscribed-courses?fields[course]=id,url,published_title&page=1&page_size=1000&ordering=-access_time&search={course_name}"
+COURSE_URL = 'https://{portal_name}.udemy.com/api-2.0/courses/{course_id}/cached-subscriber-curriculum-items?fields[asset]=results,external_url,time_estimation,download_urls,slide_urls,filename,asset_type,captions,stream_urls,body&fields[chapter]=object_index,title,sort_order&fields[lecture]=id,title,object_index,asset,supplementary_assets,view_html&page_size=10000'
 HEADERS = {
-            'User-Agent' : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_3) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
-            'X-Requested-With'  : 'XMLHttpRequest',
-            'Host' : 'www.udemy.com',
-            'Referer' : 'https://www.udemy.com/join/login-popup'
+            'Origin': 'www.udemy.com',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:66.0) Gecko/20100101 Firefox/66.0',
+            'Referer': 'https://www.udemy.com/join/login-popup/',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
             }
 
 
@@ -84,6 +92,7 @@ __ALL__ = [
     'time',
     'json',
     'pyver',
+    'codecs',
     'encoding',
     'requests',
     'conn_error',
@@ -95,10 +104,14 @@ __ALL__ = [
     'compat_httperr',
     'compat_urlparse',
     'compat_HTMLParser',
+    'ParseCookie',
     'HEADERS',
     'LOGIN_URL',
     'NO_DEFAULT',
     'COURSE_URL',
     'LOGOUT_URL',
-    'LOGIN_POPUP',
+    'WISHLIST_URL',
+    'COLLECTION_URL',
+    'MY_COURSES_URL',
+    'COURSE_SEARCH'
     ]

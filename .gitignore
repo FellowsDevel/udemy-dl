@@ -1,3 +1,6 @@
+cookies.txt
+new_cook.txt
+new_cookies.txt
 pack.sublime-project
 pack.sublime-workspace
 # Byte-compiled / optimized / DLL files
@@ -84,6 +87,9 @@ celerybeat-schedule
 .venv/
 venv/
 ENV/
+bin/
+include/
+pip-selfcheck.json
 
 # Spyder project settings
 .spyderproject
